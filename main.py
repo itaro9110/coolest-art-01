@@ -1,400 +1,264 @@
-"""Coolest art, make.fun coolest-art-01: a lone astronaut drifts before a
-colossal ringed planet. Pure Python 3.13 stdlib: the scene is drawn
-procedurally (gradients, noise, capsules, ellipses) and encoded as PNG
-by hand. Deterministic: fixed seed, no clock, no network."""
-import math
-import os
-import random
-import struct
-import zlib
+# The Last Lighthouse -- a keeper relights the lamp as a small boat finds home.
+# Pure stdlib Python 3.13. Deterministic: fixed seed, no time, no network.
+import math, os, random, struct, zlib
 
 W = H = 1024
-PX = bytearray(W * H * 3)
+OUT = os.environ.get("MAKEFUN_OUTPUT_DIR", "/tmp")
+rng = random.Random(20261113)
+img = bytearray(W * H * 3)
 
-
-def clamp(x, a=0.0, b=1.0):
-    return a if x < a else b if x > b else x
-
-
-def lerp(a, b, t):
-    return a + (b - a) * t
-
-
-def sm(t):
-    t = clamp(t)
-    return t * t * (3.0 - 2.0 * t)
-
-
-def put(x, y, r, g, b):
+def P(x, y, r, g, b):
     if 0 <= x < W and 0 <= y < H:
         i = (y * W + x) * 3
-        PX[i] = r
-        PX[i + 1] = g
-        PX[i + 2] = b
+        img[i] = r; img[i+1] = g; img[i+2] = b
 
-
-def blend(x, y, r, g, b, a):
-    if 0 <= x < W and 0 <= y < H and a > 0.0:
+def B(x, y, r, g, b, a):
+    if 0 <= x < W and 0 <= y < H and a > 0:
         i = (y * W + x) * 3
-        if a >= 1.0:
-            PX[i] = r
-            PX[i + 1] = g
-            PX[i + 2] = b
-        else:
-            PX[i] = int(PX[i] + (r - PX[i]) * a)
-            PX[i + 1] = int(PX[i + 1] + (g - PX[i + 1]) * a)
-            PX[i + 2] = int(PX[i + 2] + (b - PX[i + 2]) * a)
+        img[i] = int(img[i] + (r - img[i]) * a)
+        img[i+1] = int(img[i+1] + (g - img[i+1]) * a)
+        img[i+2] = int(img[i+2] + (b - img[i+2]) * a)
 
+def row(y, r, g, b):
+    i = y * W * 3
+    img[i:i + W * 3] = bytes((r, g, b)) * W
 
-def get(x, y):
+def mix(a, b, t):
+    return a + (b - a) * t
+
+# --- storm sky: deep indigo above, bruised pale light near the horizon ---
+for y in range(0, 620):
+    t = y / 620
+    row(y, int(mix(16, 74, t)), int(mix(22, 84, t)), int(mix(44, 104, t)))
+
+def blob(cx, cy, rx, ry, r, g, b, a):
+    # soft ellipse, alpha fading to the edge
+    for y in range(max(0, int(cy - ry)), min(H, int(cy + ry) + 1)):
+        dy = (y - cy) / ry
+        dx = math.sqrt(max(0.0, 1 - dy * dy)) * rx
+        for x in range(max(0, int(cx - dx)), min(W, int(cx + dx) + 1)):
+            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+            B(x, y, r, g, b, a * max(0.0, 1 - d))
+
+# heavy storm clouds, dark bellies, lit undersides low down
+for _ in range(38):
+    cx = rng.uniform(-80, W + 80); cy = rng.uniform(20, 420)
+    blob(cx, cy, rng.uniform(90, 250), rng.uniform(26, 68),
+         10, 13, 30, rng.uniform(.25, .55))
+for _ in range(16):
+    cx = rng.uniform(0, W); cy = rng.uniform(330, 560)
+    blob(cx, cy, rng.uniform(80, 220), rng.uniform(18, 44),
+         150, 140, 110, rng.uniform(.10, .22))
+
+# --- sea: dark swell below the horizon, a little warmer near the rocks ---
+for y in range(620, H):
+    t = (y - 620) / (H - 620)
+    row(y, int(mix(20, 8, t)), int(mix(34, 14, t)), int(mix(52, 26, t)))
+
+# foam crests: short pale strokes riding the swell
+for _ in range(110):
+    y = int(rng.uniform(640, 1000)); x0 = int(rng.uniform(0, W - 180))
+    ln = int(rng.uniform(40, 180)); a = rng.uniform(.12, .4)
+    for x in range(x0, x0 + ln):
+        yy = y + int(3 * math.sin((x - x0) / 22))
+        B(x, yy, 170, 190, 210, a * (1 - abs(x - x0 - ln / 2) / (ln / 2)))
+
+# faint warm haze on the water, under where the lamp will shine
+blob(660, 640, 320, 26, 200, 150, 70, .10)
+
+def poly(points, r, g, b):
+    # scanline fill of a simple polygon
+    ys = [int(p[1]) for p in points]
+    for y in range(max(0, min(ys)), min(H, max(ys) + 1)):
+        xs = []
+        for i in range(len(points)):
+            x1, y1 = points[i]; x2, y2 = points[(i + 1) % len(points)]
+            if (y1 <= y < y2) or (y2 <= y < y1):
+                xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+        if len(xs) >= 2:
+            xs.sort()
+            for x in range(max(0, int(xs[0])), min(W, int(xs[-1]) + 1)):
+                P(x, y, r, g, b)
+
+def ridge(x0, x1, ybase, n, r, g, b):
+    # jagged rock silhouette between x0 and x1, rising off ybase
+    pts = [(x0, ybase)]
+    for i in range(1, n):
+        pts.append((x0 + (x1 - x0) * i / n, ybase - rng.uniform(20, 120)))
+    pts.append((x1, ybase))
+    poly(pts, r, g, b)
+
+# rock shelf across the lower right, tower ground; a low reef at left
+ridge(430, 1024, 900, 14, 14, 14, 18)
+ridge(0, 300, 930, 8, 12, 12, 16)
+ridge(560, 900, 900, 9, 20, 20, 26)
+
+# warm lamplight spilling onto the rocks below
+blob(660, 870, 280, 70, 255, 180, 90, .12)
+
+# --- the lighthouse: tapered tower, warm stone, storm-dark bands ---
+TX = 660   # tower centre x at the base
+TB = 800   # base y
+TT = 300   # top y
+
+def tower_half(y):
+    return 46 - 18 * (TB - y) / (TB - TT)
+
+for y in range(TT, TB + 1):
+    hw = tower_half(y)
+    for x in range(int(TX - hw), int(TX + hw) + 1):
+        s = (x - (TX - hw)) / (2 * hw)   # 0 left .. 1 right
+        shade = 0.72 + 0.28 * s
+        P(x, y, int(214 * shade), int(196 * shade), int(164 * shade))
+
+# dark storm bands
+for by in (430, 520, 610):
+    for y in range(by, by + 34):
+        hw = tower_half(y)
+        for x in range(int(TX - hw), int(TX + hw) + 1):
+            P(x, y, 42, 38, 44)
+
+# small warm windows, lit from inside
+for wy, wx in ((380, -14), (470, 12), (560, -10)):
+    for y in range(wy, wy + 12):
+        for x in range(TX + wx, TX + wx + 9):
+            P(x, y, 255, 190, 90)
+
+# door at the base
+for y in range(756, TB + 1):
+    for x in range(TX - 13, TX + 14):
+        P(x, y, 26, 24, 28)
+
+# --- the lamp: first the halo, then glass, roof, gallery ---
+blob(TX, 258, 150, 110, 255, 170, 60, .45)
+blob(TX, 258, 70, 55, 255, 220, 130, .6)
+
+# lamp room: bright glass panes
+for y in range(238, 278):
+    hw = 30 - (y - 238) * 0.1
+    for x in range(int(TX - hw), int(TX + hw) + 1):
+        P(x, y, 255, 190, 90)
+# mullion bars
+for x in (TX - 10, TX, TX + 10):
+    for y in range(238, 278):
+        P(x, y, 40, 36, 40)
+# roof cap
+for y in range(224, 238):
+    hw = 34 - (y - 224) * 0.6
+    for x in range(int(TX - hw), int(TX + hw) + 1):
+        P(x, y, 30, 28, 34)
+# gallery platform + railing
+for x in range(TX - 58, TX + 59):
+    P(x, 292, 30, 28, 34)
+for x in range(TX - 58, TX + 59, 8):
+    for y in range(276, 292):
+        P(x, y, 30, 28, 34)
+
+# --- the beam: two warm cones from the lamp, fading with distance ---
+def beam(dx, dy):
+    for d in range(0, 720, 2):
+        cx = TX + dx * d; cy = 258 + dy * d
+        wdt = 26 + d * 0.16
+        a = 0.34 * (1 - d / 720)
+        for y in range(int(cy - wdt), int(cy + wdt) + 1):
+            for x in range(int(cx - 6), int(cx + 7)):
+                B(x, y, 255, 200, 110, a * max(0.0, 1 - abs(y - cy) / wdt) * 0.5)
+
+beam(-1, 0.10)    # out to sea, toward the boat
+beam(1, -0.04)    # across the sky, nearly level
+
+# --- the small boat, rowing home into the light ---
+BX, BY = 330, 760
+# hull: dark trapezoid
+poly([(BX - 54, BY - 4), (BX + 54, BY - 4),
+      (BX + 40, BY + 16), (BX - 40, BY + 16)], 24, 22, 26)
+# mast + pale sail
+for y in range(BY - 62, BY - 4):
+    P(BX + 6, y, 30, 28, 32)
+poly([(BX + 8, BY - 58), (BX + 8, BY - 8), (BX + 48, BY - 8)],
+     216, 200, 170)
+# rower: small dark silhouette, oar dipping
+blob(BX - 18, BY - 16, 5, 6, 18, 16, 20, 1)
+for y in range(BY - 12, BY - 2):
+    P(BX - 18, y, 18, 16, 20)
+for i in range(16):
+    P(BX - 30 - i, BY - 2 + i, 40, 38, 42)
+# bow lantern: warm dot + halo + reflection on the water
+blob(BX + 46, BY - 8, 26, 20, 255, 200, 110, .55)
+blob(BX + 46, BY - 8, 6, 6, 255, 230, 150, 1)
+for y in range(BY + 18, BY + 70):
+    B(BX + 46, y, 255, 190, 100, .22 * (1 - (y - BY) / 70))
+
+# --- the keeper: small silhouette on the gallery, arm raised to the lamp ---
+KX = TX + 18
+for y in range(258, 292):
+    P(KX, y, 20, 18, 22)
+    P(KX + 1, y, 20, 18, 22)
+blob(KX, 252, 5, 6, 20, 18, 22, 1)
+for i in range(10):
+    P(KX - 8 + i, 268 - i, 20, 18, 22)
+
+# the keeper's own small lantern, raised toward the lamp
+blob(KX - 10, 256, 7, 7, 255, 200, 110, .8)
+
+# --- rain: diagonal streaks across the whole frame ---
+for _ in range(500):
+    x = int(rng.uniform(0, W)); y = int(rng.uniform(0, H))
+    for i in range(7):
+        B(x + i, y + i * 2, 180, 190, 210, .18)
+
+# --- vignette: darken the corners so the lamp holds the eye ---
+for y in range(H):
+    dy = (y - 512) / 512
+    for x in range(W):
+        dx = (x - 512) / 512
+        d = dx * dx + dy * dy
+        if d > 0.55:
+            f = 1 - 0.32 * min(1, (d - 0.55) / 0.45)
+            i = (y * W + x) * 3
+            img[i] = int(img[i] * f)
+            img[i+1] = int(img[i+1] * f)
+            img[i+2] = int(img[i+2] * f)
+
+# grain: a little texture over the flat gradients
+for _ in range(90000):
+    x = int(rng.uniform(0, W)); y = int(rng.uniform(0, H))
+    n = rng.randint(-7, 7)
     i = (y * W + x) * 3
-    return PX[i], PX[i + 1], PX[i + 2]
+    img[i] = max(0, min(255, img[i] + n))
+    img[i+1] = max(0, min(255, img[i+1] + n))
+    img[i+2] = max(0, min(255, img[i+2] + n))
 
-
-def h2(ix, iy, s=0):
-    n = (ix * 374761393 + iy * 668265263 + s * 974634211) & 0xFFFFFFFF
-    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
-    return ((n ^ (n >> 16)) & 0xFFFFFFFF) / 4294967295.0
-
-
-def vnoise(x, y, s=0):
-    ix = math.floor(x)
-    iy = math.floor(y)
-    fx = x - ix
-    fy = y - iy
-    ux = sm(fx)
-    uy = sm(fy)
-    a = h2(ix, iy, s)
-    b = h2(ix + 1, iy, s)
-    c = h2(ix, iy + 1, s)
-    d = h2(ix + 1, iy + 1, s)
-    return lerp(lerp(a, b, ux), lerp(c, d, ux), uy)
-
-
-def fbm(x, y, s=0, oct=3):
-    v = 0.0
-    amp = 0.5
-    f = 1.0
-    for _ in range(oct):
-        v += amp * vnoise(x * f, y * f, s)
-        amp *= 0.5
-        f *= 2.03
-    return v
-
-
-def sky():
-    # Vertical gradient: near-black indigo at top, deep violet at bottom.
-    # Nebula evaluated on a coarse grid, then bilinearly sampled per pixel.
-    gw = gh = 96
-    grid = []
-    for gy in range(gh + 1):
-        row = []
-        for gx in range(gw + 1):
-            a = fbm(gx * 0.055, gy * 0.055, 7, 3)
-            b = fbm(gx * 0.055 + 40.0, gy * 0.055 + 9.0, 21, 3)
-            row.append((a, b))
-        grid.append(row)
-    for y in range(H):
-        t = y / (H - 1)
-        br = lerp(4, 16, t)
-        bg = lerp(6, 10, t)
-        bb = lerp(18, 38, t)
-        gyf = y / (H - 1) * gh
-        gy0 = int(gyf)
-        gy1 = min(gy0 + 1, gh)
-        wy = gyf - gy0
-        base = y * W * 3
-        for x in range(W):
-            gxf = x / (W - 1) * gw
-            gx0 = int(gxf)
-            gx1 = min(gx0 + 1, gw)
-            wx = gxf - gx0
-            a0 = lerp(grid[gy0][gx0][0], grid[gy0][gx1][0], wx)
-            a1 = lerp(grid[gy1][gx0][0], grid[gy1][gx1][0], wx)
-            na = lerp(a0, a1, wy)
-            b0 = lerp(grid[gy0][gx0][1], grid[gy0][gx1][1], wx)
-            b1 = lerp(grid[gy1][gx0][1], grid[gy1][gx1][1], wx)
-            nb = lerp(b0, b1, wy)
-            # Teal-violet nebula where the noise is high, warm ember
-            # where the second field peaks; both fade to the gradient.
-            na2 = sm((na - 0.52) * 3.2)
-            nb2 = sm((nb - 0.60) * 3.0)
-            r = br + 42 * nb2 + 8 * na2
-            g = bg + 26 * na2 + 14 * nb2
-            bl = bb + 58 * na2 + 6 * nb2
-            i = base + x * 3
-            PX[i] = int(min(255, r))
-            PX[i + 1] = int(min(255, g))
-            PX[i + 2] = int(min(255, bl))
-
-
-def stars():
-    rng = random.Random(20261113)
-    for _ in range(750):
-        x = rng.randrange(W)
-        y = rng.randrange(H)
-        m = rng.random()
-        if m < 0.72:
-            v = rng.randint(150, 235)
-            put(x, y, v, v, int(v * 0.92))
-        elif m < 0.9:
-            v = rng.randint(180, 255)
-            put(x, y, v, v, v)
-            if rng.random() < 0.5:
-                blend(x + 1, y, v // 2, v // 2, v // 2, 0.5)
-                blend(x, y + 1, v // 2, v // 2, v // 2, 0.5)
-        else:  # rare bright star with a cross flare
-            v = 255
-            put(x, y, v, v, v)
-            for d in range(1, 7):
-                a = 0.55 * (1 - d / 7.0)
-                blend(x + d, y, v, v, v, a)
-                blend(x - d, y, v, v, v, a)
-                blend(x, y + d, v, v, v, a)
-                blend(x, y - d, v, v, v, a)
-
-
-# Planet: huge, centre upper-right, radius 400; light from upper-left.
-PCX, PCY, PR = 745, 300, 400
-LX, LY = -0.62, -0.55  # sun direction (normalised below)
-_LN = math.hypot(LX, LY)
-LX, LY = LX / _LN, LY / _LN
-
-# Warm band palette, dark rust -> gold -> pale cream.
-BANDS = [
-    (52, 26, 14), (122, 62, 22), (196, 116, 40), (238, 176, 84),
-    (150, 88, 34), (214, 148, 62), (96, 48, 22), (232, 190, 120),
-    (176, 104, 44), (70, 36, 18),
-]
-
-
-def planet():
-    x0 = max(0, PCX - PR)
-    x1 = min(W, PCX + PR + 1)
-    y0 = max(0, PCY - PR)
-    y1 = min(H, PCY + PR + 1)
-    for y in range(y0, y1):
-        dy = (y - PCY) / PR
-        for x in range(x0, x1):
-            dx = (x - PCX) / PR
-            d2 = dx * dx + dy * dy
-            if d2 >= 1.0:
-                continue
-            dz = math.sqrt(1.0 - d2)
-            # Turbulent horizontal bands.
-            turb = fbm(x * 0.012, y * 0.05, 3, 2) - 0.5
-            t = clamp(0.5 + dy * 0.5 + turb * 0.55)
-            fi = t * (len(BANDS) - 1)
-            i0 = int(fi)
-            i1 = min(i0 + 1, len(BANDS) - 1)
-            ft = fi - i0
-            c0 = BANDS[i0]
-            c1 = BANDS[i1]
-            r = lerp(c0[0], c1[0], ft)
-            g = lerp(c0[1], c1[1], ft)
-            b = lerp(c0[2], c1[2], ft)
-            # Diffuse light from the sun direction; night side falls
-            # to near-black with the bands just barely visible.
-            dif = clamp(dx * LX + dy * LY + dz * 0.55)
-            lit = 0.24 + 0.95 * dif
-            # Bright limb on the sun side.
-            limb = sm((dz - 0.82) * 6.0) * sm((dx * LX + dy * LY + 0.35) * 2.0)
-            r = r * lit + 120 * limb
-            g = g * lit + 70 * limb
-            b = b * lit + 26 * limb
-            put(x, y, int(min(255, r)), int(min(255, g)), int(min(255, b)))
-
-
-def rings(front):
-    # Tilted ellipse around the planet: semi-major 640, semi-minor 165,
-    # tilt -18 degrees. front=True draws the near half (v >= 0), which
-    # crosses in front of the planet; the far half goes behind it.
-    ang = math.radians(-18)
-    ca = math.cos(ang)
-    sa = math.sin(ang)
-    for y in range(max(0, PCY - 200), min(H, PCY + 201)):
-        for x in range(max(0, PCX - 660), min(W, PCX + 661)):
-            dx = x - PCX
-            dy = y - PCY
-            u = ca * dx + sa * dy
-            v = -sa * dx + ca * dy
-            if front != (v >= 0):
-                continue
-            rn = math.sqrt((u / 640.0) ** 2 + (v / 165.0) ** 2)
-            if rn < 0.66 or rn > 1.0:
-                continue
-            # Banded, slightly turbulent ring material with gaps.
-            band = 0.5 + 0.5 * math.sin(rn * 46.0 + 2.5 * fbm(x * 0.02, y * 0.02, 5, 2))
-            gap = sm((band - 0.42) * 2.6)
-            if gap <= 0.02:
-                continue
-            # Sun side (upper-left) brighter; far half dimmer overall.
-            sun = clamp(0.55 + 0.45 * (-(u / 640.0) * 0.7 + -(v / 165.0) * 0.3))
-            bright = (0.8 if not front else 1.0) * sun
-            a = gap * 0.85 * bright * sm((rn - 0.66) * 10.0) * sm((1.0 - rn) * 10.0)
-            r = 238 * bright + 12
-            g = 198 * bright + 8
-            b = 138 * bright + 4
-            blend(x, y, int(min(255, r)), int(min(255, g)), int(min(255, b)), a)
-
-
-def seg_dist(px, py, ax, ay, bx, by):
-    vx = bx - ax
-    vy = by - ay
-    wx = px - ax
-    wy = py - ay
-    dd = vx * vx + vy * vy
-    t = 0.0 if dd == 0 else clamp((wx * vx + wy * vy) / dd)
-    cx = ax + t * vx
-    cy = ay + t * vy
-    return math.hypot(px - cx, py - cy)
-
-
-def capsule(ax, ay, bx, by, r, col, alpha=1.0):
-    x0 = max(0, int(min(ax, bx) - r - 1))
-    x1 = min(W - 1, int(max(ax, bx) + r + 1))
-    y0 = max(0, int(min(ay, by) - r - 1))
-    y1 = min(H - 1, int(max(ay, by) + r + 1))
-    for y in range(y0, y1 + 1):
-        for x in range(x0, x1 + 1):
-            if seg_dist(x + 0.5, y + 0.5, ax, ay, bx, by) <= r:
-                if alpha >= 1.0:
-                    put(x, y, col[0], col[1], col[2])
-                else:
-                    blend(x, y, col[0], col[1], col[2], alpha)
-
-
-def disc(cx, cy, r, col, alpha=1.0):
-    capsule(cx, cy, cx, cy, r, col, alpha)
-
-
-def astronaut():
-    # Local frame, torso centre at origin; rotate -12 deg, move to (400, 720).
-    ang = math.radians(-12)
-    ca = math.cos(ang)
-    sa = math.sin(ang)
-    ox, oy = 400, 720
-
-    def tr(lx, ly):
-        return ox + (ca * lx - sa * ly) * 1.6, oy + (sa * lx + ca * ly) * 1.6
-
-    suit = (26, 30, 48)
-    rim = (255, 196, 110)
-    # (endpoints local, radius, colour) — rim pass offset toward the planet.
-    parts = [
-        ((0, -18), (0, 28), 20),      # torso
-        ((-22, -2), (-24, 24), 13),   # backpack
-        ((14, -8), (38, 18), 9),      # arm reaching toward the planet
-        ((-14, -6), (-34, 22), 9),    # other arm
-        ((6, 26), (26, 62), 10),      # leg
-        ((-8, 26), (-22, 58), 10),    # leg
-    ]
-    for off, col in (((7, -5), rim), ((0, 0), suit)):
-        for (a, b, r) in parts:
-            ax, ay = tr(a[0] + off[0], a[1] + off[1])
-            bx, by = tr(b[0] + off[0], b[1] + off[1])
-            capsule(ax, ay, bx, by, r, col)
-    # Helmet: dark shell, then a visor burning with reflected planet light.
-    hx, hy = tr(2, -48)
-    disc(hx, hy, 40, suit)
-    vx, vy = tr(10, -50)
-    disc(vx, vy, 27, (250, 176, 84))
-    disc(vx - 5, vy - 6, 14, (255, 226, 160))
-    disc(vx + 10, vy + 8, 6, (255, 244, 214))
-    # Tether: a slack curve from the backpack down and away off-frame.
-    bx, by = tr(-24, 20)
-    cx, cy = 560, 800
-    ex, ey = 640, 930
-    prev = (bx, by)
-    for i in range(1, 41):
-        t = i / 40.0
-        x = (1 - t) * (1 - t) * bx + 2 * (1 - t) * t * cx + t * t * ex
-        y = (1 - t) * (1 - t) * by + 2 * (1 - t) * t * cy + t * t * ey
-        capsule(prev[0], prev[1], x, y, 1.4, (150, 152, 168), 0.75)
-        prev = (x, y)
-
-
-def ridge():
-    # Jagged asteroid ridge along the bottom, near-black with a warm
-    # rim on its upper edge where the planet light catches it.
-    tops = []
-    for x in range(W):
-        tops.append(H - 46 - fbm(x * 0.008, 0.0, 11, 3) * 110)
-    for x in range(W):
-        t = int(tops[x])
-        for y in range(max(0, t), H):
-            put(x, y, 9, 8, 16)
-        # Rim light on the crest, stronger toward the planet (right).
-        warm = 0.25 + 0.75 * (x / W)
-        for dy in range(3):
-            yy = t + dy
-            if 0 <= yy < H:
-                a = (0.55 - dy * 0.18) * warm
-                blend(x, yy, 214, 138, 62, a)
-
-
-def finish():
-    # Vignette + a whisper of grain, one pass over the whole frame.
-    for y in range(H):
-        ny = (y / (H - 1) - 0.5)
-        base = y * W * 3
-        for x in range(W):
-            nx = (x / (W - 1) - 0.5)
-            d = nx * nx + ny * ny
-            vig = 1.0 - 0.34 * sm(d * 1.6)
-            g = (h2(x // 2, y // 2, 99) - 0.5) * 3.0
-            i = base + x * 3
-            PX[i] = int(clamp(PX[i] * vig + g, 0, 255))
-            PX[i + 1] = int(clamp(PX[i + 1] * vig + g, 0, 255))
-            PX[i + 2] = int(clamp(PX[i + 2] * vig + g, 0, 255))
-
-
-def chunk(typ, data):
-    out = struct.pack(">I", len(data)) + typ + data
-    out += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
-    return out
-
-
-def png_bytes():
+# --- PNG encoder: hand-rolled, Sub filter, zlib level 9 ---
+def save(path):
     raw = bytearray()
-    stride = W * 3
     for y in range(H):
-        row = PX[y * stride:(y + 1) * stride]
-        # Sub filter: smooth art compresses far better than raw rows.
-        filt = bytearray(stride)
-        for i in range(stride):
-            left = row[i - 3] if i >= 3 else 0
-            filt[i] = (row[i] - left) & 0xFF
         raw.append(1)
-        raw.extend(filt)
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-        + chunk(b"IEND", b"")
-    )
+        st = y * W * 3
+        prev = (0, 0, 0)
+        line = bytearray()
+        for i in range(0, W * 3, 3):
+            r, g, b = img[st+i], img[st+i+1], img[st+i+2]
+            line += bytes(((r - prev[0]) & 255,
+                           (g - prev[1]) & 255, (b - prev[2]) & 255))
+            prev = (r, g, b)
+        raw += line
+    comp = zlib.compress(bytes(raw), 9)
+    def ck(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    data = b"\x89PNG\r\n\x1a\n"
+    data += ck(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+    data += ck(b"IDAT", comp)
+    data += ck(b"IEND", b"")
+    open(path, "wb").write(data)
+
+save(os.path.join(OUT, "entry.png"))
+print("wrote", os.path.join(OUT, "entry.png"))
 
 
-def main():
-    sky()
-    stars()
-    rings(False)
-    planet()
-    rings(True)
-    astronaut()
-    ridge()
-    finish()
-    out = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out, exist_ok=True)
-    path = os.path.join(out, "entry.png")
-    with open(path, "wb") as f:
-        f.write(png_bytes())
-    print("wrote", path)
 
 
-if __name__ == "__main__":
-    main()
 
 
 
